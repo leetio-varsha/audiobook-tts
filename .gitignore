@@ -1,0 +1,54 @@
+# Virtual environment
+.venv/
+venv/
+env/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.pdb
+
+# Cache and output directories
+cache/
+output/
+
+# Voice samples (personal files, not tracked)
+voices/*.wav
+voices/*.mp3
+
+# Audiobook output files
+*.m4b
+*.mp3
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Distribution / packaging
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Environment files
+.env
+.env.local
+
+# TTS model cache (large, downloaded automatically)
+# ~/.local/share/tts/ is outside project, no need to ignore here
+
+# Logs
+*.log

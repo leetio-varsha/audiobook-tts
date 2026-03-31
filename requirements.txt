@@ -1,0 +1,25 @@
+# TTS engine — Coqui TTS with XTTS v2
+TTS>=0.22.0
+
+# PyTorch — standard macOS wheel supports MPS (Metal)
+torch>=2.1.0
+torchaudio>=2.1.0
+
+# FB2 parsing
+lxml>=4.9.0
+
+# EPUB parsing
+ebooklib>=0.18
+beautifulsoup4>=4.12.0
+
+# PDF parsing
+pdfminer.six>=20221105
+
+# Web UI
+gradio>=4.0.0
+
+# CLI progress
+tqdm>=4.65.0
+
+# Utilities
+numpy>=1.24.0

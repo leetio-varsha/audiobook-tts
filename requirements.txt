@@ -1,9 +1,14 @@
-# TTS engine — Coqui TTS with XTTS v2
-TTS>=0.22.0
+# TTS engine — Silero v4 (active) via torch.hub (no separate pip install needed)
+# XTTS v2 / Coqui TTS — commented out, kept for reference
+# TTS>=0.22.0
+# transformers>=4.36,<4.40
 
 # PyTorch — standard macOS wheel supports MPS (Metal)
 torch>=2.1.0
 torchaudio>=2.1.0
+
+# Russian stress mark preprocessing (improves TTS accent placement)
+ruaccent>=1.5.0
 
 # FB2 parsing
 lxml>=4.9.0

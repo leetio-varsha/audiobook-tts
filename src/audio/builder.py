@@ -2,10 +2,11 @@
 
 Pipeline per chapter:
   1. Concatenate WAV chunks for the chapter via ffmpeg concat demuxer
+     (with configurable silence between chunks for natural pacing)
   2. Build chapter AAC files
 
 Final pipeline:
-  3. Concatenate all chapter AAC files
+  3. Concatenate all chapter WAVs with inter-chapter silence
   4. Embed chapter markers via ffmpeg metadata file (;FFMETADATA1 format)
   5. Embed cover art if available
   6. Set title/artist metadata tags
@@ -32,8 +33,12 @@ class AudioBuilder:
         title: Book title (embedded as metadata).
         author: Book author (embedded as metadata).
         cover_bytes: Optional JPEG/PNG cover image bytes.
-        sample_rate: WAV sample rate (default 24000 Hz — XTTS v2 output).
+        sample_rate: WAV sample rate (default 24000 Hz — Silero output).
         bitrate: AAC bitrate (default "128k").
+        chunk_silence_ms: Silence inserted between WAV chunks within a chapter
+            (default 250 ms). Smooths over abrupt TTS joins.
+        chapter_silence_ms: Silence inserted between chapters
+            (default 700 ms). Gives the listener a clear chapter break.
     """
 
     def __init__(
@@ -44,6 +49,8 @@ class AudioBuilder:
         cover_bytes: Optional[bytes] = None,
         sample_rate: int = 24000,
         bitrate: str = "128k",
+        chunk_silence_ms: int = 250,
+        chapter_silence_ms: int = 700,
     ):
         self.output_path = Path(output_path)
         self.title = title
@@ -51,6 +58,8 @@ class AudioBuilder:
         self.cover_bytes = cover_bytes
         self.sample_rate = sample_rate
         self.bitrate = bitrate
+        self.chunk_silence_ms = chunk_silence_ms
+        self.chapter_silence_ms = chapter_silence_ms
 
     # ------------------------------------------------------------------
     # Public API
@@ -75,6 +84,14 @@ class AudioBuilder:
         with tempfile.TemporaryDirectory(prefix="audiobook_build_") as tmpdir:
             tmp = Path(tmpdir)
 
+            # Generate silence WAV files (reused across all concat operations)
+            chunk_silence = self._generate_silence_wav(
+                tmp / "silence_chunk.wav", self.chunk_silence_ms
+            )
+            chapter_silence = self._generate_silence_wav(
+                tmp / "silence_chapter.wav", self.chapter_silence_ms
+            )
+
             # Step 1: Concatenate WAV chunks per chapter → chapter_N.wav
             chapter_wavs: list[Path] = []
             chapter_durations_ms: list[int] = []
@@ -83,7 +100,8 @@ class AudioBuilder:
                 if not wav_list:
                     continue
                 chapter_wav = tmp / f"chapter_{i:04d}.wav"
-                self._concat_wavs(wav_list, chapter_wav)
+                # Insert short silence between chunks for natural pacing
+                self._concat_wavs(wav_list, chapter_wav, between=chunk_silence)
                 duration_ms = self._get_duration_ms(chapter_wav)
                 chapter_wavs.append(chapter_wav)
                 chapter_durations_ms.append(duration_ms)
@@ -92,8 +110,9 @@ class AudioBuilder:
                 raise RuntimeError("No audio content to build M4B from.")
 
             # Step 2: Concatenate all chapter WAVs → full_audio.wav
+            # Insert longer silence between chapters
             full_wav = tmp / "full_audio.wav"
-            self._concat_wavs(chapter_wavs, full_wav)
+            self._concat_wavs(chapter_wavs, full_wav, between=chapter_silence)
 
             # Step 3: Build ffmpeg metadata file with chapter markers
             titles_used = chapter_titles[: len(chapter_wavs)]
@@ -116,15 +135,41 @@ class AudioBuilder:
     # ffmpeg helpers
     # ------------------------------------------------------------------
 
-    def _concat_wavs(self, wav_paths: list[Path], output: Path) -> None:
-        """Concatenate multiple WAV files into one using ffmpeg concat demuxer."""
-        # Write a concat list file
+    def _generate_silence_wav(self, output: Path, duration_ms: int) -> Path:
+        """Generate a mono WAV file of pure silence with the configured sample rate."""
+        duration_sec = duration_ms / 1000.0
+        cmd = [
+            "ffmpeg", "-y",
+            "-f", "lavfi",
+            "-i", f"anullsrc=r={self.sample_rate}:cl=mono",
+            "-t", str(duration_sec),
+            str(output),
+        ]
+        self._run(cmd, description=f"generate {duration_ms}ms silence")
+        return output
+
+    def _concat_wavs(
+        self,
+        wav_paths: list[Path],
+        output: Path,
+        between: Optional[Path] = None,
+    ) -> None:
+        """Concatenate multiple WAV files into one using ffmpeg concat demuxer.
+
+        Args:
+            wav_paths: Ordered list of WAV files to join.
+            output: Destination WAV file.
+            between: Optional WAV silence file to insert between each pair.
+        """
         list_file = output.with_suffix(".txt")
         with open(list_file, "w", encoding="utf-8") as f:
-            for p in wav_paths:
-                # Escape single quotes in paths
+            for idx, p in enumerate(wav_paths):
                 escaped = str(p).replace("'", "'\\''")
                 f.write(f"file '{escaped}'\n")
+                # Insert silence after every file except the last
+                if between and between.exists() and idx < len(wav_paths) - 1:
+                    silence_escaped = str(between).replace("'", "'\\''")
+                    f.write(f"file '{silence_escaped}'\n")
 
         cmd = [
             "ffmpeg", "-y",
@@ -195,21 +240,22 @@ class AudioBuilder:
             "ffmpeg", "-y",
             "-i", str(input_wav),
             "-i", str(metadata_path),
-            "-map_metadata", "1",
-            "-map_chapters", "1",
         ]
 
         if cover_path and cover_path.exists():
-            cmd += [
-                "-i", str(cover_path),
+            cmd += ["-i", str(cover_path)]
+            map_opts = [
                 "-map", "0:a",
                 "-map", "2:v",
+                "-c:v", "copy",
                 "-disposition:v", "attached_pic",
             ]
         else:
-            cmd += ["-map", "0:a"]
+            map_opts = ["-map", "0:a"]
 
-        cmd += [
+        cmd += map_opts + [
+            "-map_metadata", "1",
+            "-map_chapters", "1",
             "-c:a", "aac",
             "-b:a", self.bitrate,
             "-ar", str(self.sample_rate),
@@ -237,7 +283,6 @@ class AudioBuilder:
     @staticmethod
     def _escape_meta(value: str) -> str:
         """Escape special characters for ffmpeg metadata values."""
-        # ffmpeg metadata: escape '=', ';', '#', '\', and newlines
         value = value.replace("\\", "\\\\")
         value = value.replace("=", "\\=")
         value = value.replace(";", "\\;")

@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""CLI for converting ebooks to M4B audiobooks using XTTS v2 (local, MPS-accelerated).
+"""CLI for converting ebooks to M4B audiobooks using Silero TTS v4 + optional RVC.
 
 Usage:
     python convert.py --input book.fb2 --output audiobook.m4b
-    python convert.py --input book.epub --output audiobook.m4b --voice voices/sample.wav
+    python convert.py --input book.epub --output audiobook.m4b --speaker aidar
     python convert.py --input book.pdf --output audiobook.m4b --language en
-    python convert.py --input book.fb2 --output out.m4b --voice voices/sample.wav --language ru
+    python convert.py --input book.fb2 --output out.m4b --rvc-model MyVoice
+    python convert.py --input book.fb2 --output out.m4b --rvc-model path/to/model.pth --pitch-shift -2
 """
 
 from __future__ import annotations
@@ -35,7 +36,7 @@ logger = logging.getLogger("convert")
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Convert ebook (FB2/EPUB/PDF) to M4B audiobook using XTTS v2.",
+        description="Convert ebook (FB2/EPUB/PDF) to M4B audiobook using Silero TTS v4.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
@@ -52,16 +53,35 @@ def parse_args() -> argparse.Namespace:
         help="Path to the output M4B file",
     )
     parser.add_argument(
-        "--voice", "-v",
-        default=None,
-        metavar="WAV",
-        help="Path to a WAV voice sample for cloning (optional)",
+        "--speaker", "-s",
+        default="xenia",
+        metavar="NAME",
+        help="Silero speaker: xenia, baya, kseniya, aidar, eugene (default: xenia)",
     )
     parser.add_argument(
         "--language", "-l",
         default="ru",
         metavar="LANG",
-        help='TTS language code (default: "ru"). Examples: ru, en, de, fr, es',
+        help='TTS language code (default: "ru")',
+    )
+    parser.add_argument(
+        "--rvc-model",
+        default=None,
+        metavar="NAME_OR_PATH",
+        help="RVC voice: a profile name from ./voices/ or a path to a .pth file",
+    )
+    parser.add_argument(
+        "--rvc-index",
+        default=None,
+        metavar="PATH",
+        help="Path to RVC .index file (optional, used with --rvc-model path)",
+    )
+    parser.add_argument(
+        "--pitch-shift",
+        type=int,
+        default=0,
+        metavar="N",
+        help="RVC pitch shift in semitones (default: 0)",
     )
     parser.add_argument(
         "--cache-dir",
@@ -96,7 +116,6 @@ def parse_args() -> argparse.Namespace:
 # ---------------------------------------------------------------------------
 
 def compute_book_hash(path: Path) -> str:
-    """Compute MD5 hash of book file content for cache keying."""
     h = hashlib.md5()
     with open(path, "rb") as f:
         for block in iter(lambda: f.read(65536), b""):
@@ -104,10 +123,13 @@ def compute_book_hash(path: Path) -> str:
     return h.hexdigest()
 
 
-def get_cache_dir(base: Path, book_hash: str) -> Path:
-    cache = base / book_hash
-    cache.mkdir(parents=True, exist_ok=True)
-    return cache
+def compute_cache_key(book_path: Path, engine_type: str, speaker: str, rvc_model_path: Path | None, pitch_shift: int = 0) -> str:
+    book_hash = compute_book_hash(book_path)
+    if rvc_model_path:
+        from src.rvc.converter import RVCConverter
+        model_hash = RVCConverter.compute_model_hash(rvc_model_path)
+        return f"{book_hash}_{engine_type}_{speaker}_{model_hash}_p{pitch_shift}"
+    return f"{book_hash}_{engine_type}_{speaker}"
 
 
 # ---------------------------------------------------------------------------
@@ -117,8 +139,11 @@ def get_cache_dir(base: Path, book_hash: str) -> Path:
 def convert(
     input_path: Path,
     output_path: Path,
-    voice_sample: Path | None,
+    speaker: str,
     language: str,
+    rvc_model_path: Path | None,
+    rvc_index_path: Path | None,
+    pitch_shift: int,
     cache_base: Path,
     max_words: int,
     pages_per_chapter: int,
@@ -143,25 +168,35 @@ def convert(
         sys.exit(1)
 
     # --- Set up cache ---
-    book_hash = compute_book_hash(input_path)
-    cache_dir = get_cache_dir(cache_base, book_hash)
+    cache_key = compute_cache_key(input_path, speaker, rvc_model_path, pitch_shift)
+    cache_dir = cache_base / cache_key
+    cache_dir.mkdir(parents=True, exist_ok=True)
     logger.info("Cache directory: %s", cache_dir)
 
     # --- Load TTS engine ---
-    logger.info("Loading XTTS v2 model (first run downloads ~2 GB)...")
+    logger.info("Loading Silero TTS (speaker: %s)...", speaker)
     from src.tts.engine import TTSEngine
     from src.tts.chunker import TextChunker
 
-    engine = TTSEngine(voice_sample=voice_sample, language=language)
+    engine = TTSEngine(language=language, speaker=speaker)
     chunker = TextChunker(max_words=max_words)
 
+    # --- Load RVC converter (optional) ---
+    rvc_converter = None
+    if rvc_model_path:
+        logger.info("Loading RVC model: %s (pitch: %+d)", rvc_model_path, pitch_shift)
+        from src.rvc.converter import RVCConverter
+        rvc_converter = RVCConverter(
+            model_path=rvc_model_path,
+            index_path=rvc_index_path,
+            pitch_shift=pitch_shift,
+        )
+
     # --- Synthesize chunks ---
-    # chapter_wav_lists[i] = list of WAV paths for chapter i
     chapter_wav_lists: list[list[Path]] = []
     chapter_titles: list[str] = []
 
-    # Count total chunks across all chapters for progress bar
-    all_chunks: list[tuple[int, int, str]] = []  # (chapter_idx, chunk_idx, text)
+    all_chunks: list[tuple[int, int, str]] = []
     for ch_idx, chapter in enumerate(book.chapters):
         chunks = chunker.split(chapter.text)
         for ck_idx, chunk_text in enumerate(chunks):
@@ -169,15 +204,12 @@ def convert(
 
     logger.info("Total TTS chunks: %d", len(all_chunks))
 
-    # Initialize chapter_wav_lists
     for chapter in book.chapters:
         chapter_wav_lists.append([])
         chapter_titles.append(chapter.title)
 
-    # Global chunk index across all chapters
-    global_idx = 0
-
-    with tqdm(total=len(all_chunks), desc="Synthesizing", unit="chunk") as pbar:
+    desc = "Synthesizing + RVC" if rvc_converter else "Synthesizing"
+    with tqdm(total=len(all_chunks), desc=desc, unit="chunk") as pbar:
         for ch_idx, ck_idx, chunk_text in all_chunks:
             wav_path = cache_dir / f"ch{ch_idx:04d}_ck{ck_idx:04d}.wav"
 
@@ -189,9 +221,10 @@ def convert(
                     ch_idx, ck_idx, len(chunk_text.split()),
                 )
                 engine.synthesize(chunk_text, wav_path)
+                if rvc_converter:
+                    rvc_converter.convert_in_place(wav_path)
 
             chapter_wav_lists[ch_idx].append(wav_path)
-            global_idx += 1
             pbar.update(1)
 
     # --- Build M4B ---
@@ -205,11 +238,14 @@ def convert(
         cover_bytes=book.cover_bytes,
     )
 
-    # Filter out empty chapters
     filtered_wavs = [wl for wl in chapter_wav_lists if wl]
     filtered_titles = [t for t, wl in zip(chapter_titles, chapter_wav_lists) if wl]
 
     builder.build(filtered_wavs, filtered_titles)
+
+    if rvc_converter:
+        rvc_converter.cleanup()
+
     logger.info("Done! Output: %s", output_path)
 
 
@@ -231,20 +267,37 @@ def main() -> None:
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    voice_sample: Path | None = None
-    if args.voice:
-        voice_sample = Path(args.voice)
-        if not voice_sample.exists():
-            logger.error("Voice sample not found: %s", voice_sample)
-            sys.exit(1)
+    # Resolve RVC model path
+    rvc_model_path = None
+    rvc_index_path = None
+    if args.rvc_model:
+        candidate = Path(args.rvc_model)
+        if candidate.exists() and candidate.suffix == ".pth":
+            rvc_model_path = candidate
+            if args.rvc_index:
+                rvc_index_path = Path(args.rvc_index)
+        else:
+            # Treat as a voice profile name
+            from src.rvc.voice_manager import VoiceManager
+            vm = VoiceManager()
+            model_pth, model_idx = vm.get_model_paths(args.rvc_model)
+            if model_pth:
+                rvc_model_path = model_pth
+                rvc_index_path = model_idx
+            else:
+                logger.error("RVC model not found: %s (not a file path or voice profile)", args.rvc_model)
+                sys.exit(1)
 
-    cache_base = Path(args.cache_dir)
+    cache_base = Path(args.cache_dir).resolve()
 
     convert(
         input_path=input_path,
         output_path=output_path,
-        voice_sample=voice_sample,
+        speaker=args.speaker,
         language=args.language,
+        rvc_model_path=rvc_model_path,
+        rvc_index_path=rvc_index_path,
+        pitch_shift=args.pitch_shift,
         cache_base=cache_base,
         max_words=args.max_words,
         pages_per_chapter=args.pages_per_chapter,

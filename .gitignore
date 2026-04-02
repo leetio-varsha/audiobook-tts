@@ -14,9 +14,9 @@ __pycache__/
 cache/
 output/
 
-# Voice samples (personal files, not tracked)
-voices/*.wav
-voices/*.mp3
+# Voice profiles (personal files, large models)
+voices/
+!voices/.gitkeep
 
 # Audiobook output files
 *.m4b
@@ -32,6 +32,9 @@ voices/*.mp3
 dist/
 build/
 *.egg
+
+# RVC training tools (large repo + models)
+tools/
 
 # Editor
 .vscode/

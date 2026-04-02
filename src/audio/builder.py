@@ -22,6 +22,8 @@ import tempfile
 from pathlib import Path
 from typing import Optional
 
+from src.audio.enhancer import AudioEnhancer
+
 logger = logging.getLogger(__name__)
 
 
@@ -49,8 +51,9 @@ class AudioBuilder:
         cover_bytes: Optional[bytes] = None,
         sample_rate: int = 24000,
         bitrate: str = "128k",
-        chunk_silence_ms: int = 250,
+        chunk_silence_ms: int = 150,
         chapter_silence_ms: int = 700,
+        enhance: bool = False,
     ):
         self.output_path = Path(output_path)
         self.title = title
@@ -60,6 +63,7 @@ class AudioBuilder:
         self.bitrate = bitrate
         self.chunk_silence_ms = chunk_silence_ms
         self.chapter_silence_ms = chapter_silence_ms
+        self._enhancer = AudioEnhancer(enabled=enhance)
 
     # ------------------------------------------------------------------
     # Public API
@@ -69,6 +73,7 @@ class AudioBuilder:
         self,
         chapter_wav_lists: list[list[Path]],
         chapter_titles: list[str],
+        chapter_pause_lists: list[list[int]] | None = None,
     ) -> Path:
         """Build the M4B file from per-chapter lists of WAV chunk paths.
 
@@ -100,8 +105,14 @@ class AudioBuilder:
                 if not wav_list:
                     continue
                 chapter_wav = tmp / f"chapter_{i:04d}.wav"
-                # Insert short silence between chunks for natural pacing
-                self._concat_wavs(wav_list, chapter_wav, between=chunk_silence)
+                # Use per-chunk pauses if available, else fixed silence
+                pauses = chapter_pause_lists[i] if chapter_pause_lists and i < len(chapter_pause_lists) else None
+                if pauses:
+                    self._concat_wavs_with_pauses(wav_list, chapter_wav, pauses, tmp)
+                else:
+                    self._concat_wavs(wav_list, chapter_wav, between=chunk_silence)
+                # Enhance: EQ, compression, loudnorm, light reverb, de-essing
+                self._enhancer.enhance_in_place(chapter_wav, self.sample_rate)
                 duration_ms = self._get_duration_ms(chapter_wav)
                 chapter_wavs.append(chapter_wav)
                 chapter_durations_ms.append(duration_ms)
@@ -164,11 +175,11 @@ class AudioBuilder:
         list_file = output.with_suffix(".txt")
         with open(list_file, "w", encoding="utf-8") as f:
             for idx, p in enumerate(wav_paths):
-                escaped = str(p).replace("'", "'\\''")
+                escaped = str(p.resolve()).replace("'", "'\\''")
                 f.write(f"file '{escaped}'\n")
                 # Insert silence after every file except the last
                 if between and between.exists() and idx < len(wav_paths) - 1:
-                    silence_escaped = str(between).replace("'", "'\\''")
+                    silence_escaped = str(between.resolve()).replace("'", "'\\''")
                     f.write(f"file '{silence_escaped}'\n")
 
         cmd = [
@@ -180,6 +191,41 @@ class AudioBuilder:
             str(output),
         ]
         self._run(cmd, description=f"concat WAVs → {output.name}")
+
+    def _concat_wavs_with_pauses(
+        self,
+        wav_paths: list[Path],
+        output: Path,
+        pauses_ms: list[int],
+        tmp_dir: Path,
+    ) -> None:
+        """Concatenate WAVs with variable per-chunk pauses."""
+        list_file = output.with_suffix(".txt")
+        # Pre-generate silence files for unique pause durations
+        silence_cache: dict[int, Path] = {}
+        with open(list_file, "w", encoding="utf-8") as f:
+            for idx, p in enumerate(wav_paths):
+                escaped = str(p.resolve()).replace("'", "'\\''")
+                f.write(f"file '{escaped}'\n")
+                # Get pause for this chunk (use 150ms default if not enough pauses)
+                pause = pauses_ms[idx] if idx < len(pauses_ms) else self.chunk_silence_ms
+                if pause > 0 and idx < len(wav_paths) - 1:
+                    if pause not in silence_cache:
+                        sil_path = tmp_dir / f"silence_{pause}ms.wav"
+                        if not sil_path.exists():
+                            self._generate_silence_wav(sil_path, pause)
+                        silence_cache[pause] = sil_path
+                    sil_escaped = str(silence_cache[pause].resolve()).replace("'", "'\\''")
+                    f.write(f"file '{sil_escaped}'\n")
+
+        cmd = [
+            "ffmpeg", "-y",
+            "-f", "concat", "-safe", "0",
+            "-i", str(list_file),
+            "-c", "copy",
+            str(output),
+        ]
+        self._run(cmd, description=f"concat WAVs (variable pauses) → {output.name}")
 
     def _get_duration_ms(self, wav_path: Path) -> int:
         """Return the duration of a WAV file in milliseconds."""

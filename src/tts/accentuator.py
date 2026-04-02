@@ -1,10 +1,9 @@
-"""Russian text preprocessing: stress mark placement via ruaccent.
+"""Russian text preprocessing: stress mark placement via silero-stress.
 
-Optionally used before TTS synthesis to improve pronunciation of
-Russian text. Adds stress marks to stressed vowels, which helps the
-TTS model produce correct accentuation.
+Adds stress marks ('+' before stressed vowel) and restores ё.
+Used before TTS synthesis to improve pronunciation.
 
-Falls back gracefully if ruaccent is not installed.
+Falls back to ruaccent if silero-stress is not available.
 """
 
 from __future__ import annotations
@@ -15,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 
 class RussianAccentuator:
-    """Wrapper around ruaccent for Russian stress mark placement.
+    """Wrapper around silero-stress (primary) or ruaccent (fallback).
 
     Usage::
 
@@ -23,60 +22,58 @@ class RussianAccentuator:
         acc.load()
         text = acc.process("Замок был огромным")
         # → "За+мок был огро+мным"
-
-    Args:
-        model_size: Omograph disambiguation model size.
-            ``"tiny2"``    — fastest, basic accuracy.
-            ``"turbo2"``   — best speed/quality balance (default).
-            ``"turbo3.1"`` — highest accuracy, slower.
     """
 
-    def __init__(self, model_size: str = "turbo2"):
-        self.model_size = model_size
-        self._model = None
+    def __init__(self, **kwargs):
+        self._accentor = None
+        self._backend = None
         self._available = False
 
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
-
     def load(self) -> bool:
-        """Load the ruaccent model. Returns True on success."""
+        """Load stress model. Tries silero-stress first, then ruaccent."""
+        # Try silero-stress (faster, 4M word dictionary)
         try:
-            from ruaccent import RUAccent  # type: ignore[import-untyped]
-
-            self._model = RUAccent()
-            self._model.load(
-                omograph_model_size=self.model_size,
-                use_dictionary=True,
-            )
+            from silero_stress import load_accentor
+            self._accentor = load_accentor(lang="ru")
+            self._backend = "silero-stress"
             self._available = True
-            logger.info("ruaccent loaded (model_size=%s)", self.model_size)
+            logger.info("silero-stress loaded")
             return True
         except ImportError:
-            logger.warning(
-                "ruaccent not installed — stress marks disabled. "
-                "Run: pip install ruaccent"
-            )
+            logger.info("silero-stress not installed, trying ruaccent...")
+        except Exception as exc:
+            logger.warning("silero-stress failed: %s, trying ruaccent...", exc)
+
+        # Fallback to ruaccent
+        try:
+            from ruaccent import RUAccent
+            model = RUAccent()
+            model.load(omograph_model_size="turbo2", use_dictionary=True)
+            self._accentor = model
+            self._backend = "ruaccent"
+            self._available = True
+            logger.info("ruaccent loaded (fallback)")
+            return True
+        except ImportError:
+            logger.warning("No stress model available. Install: pip install silero-stress")
             return False
         except Exception as exc:
-            logger.warning("ruaccent failed to load: %s", exc)
+            logger.warning("ruaccent failed: %s", exc)
             return False
 
     def process(self, text: str) -> str:
-        """Add stress marks to Russian text.
-
-        Returns the original text unchanged when ruaccent is unavailable.
-        """
-        if not self._available or self._model is None:
+        """Add stress marks to Russian text."""
+        if not self._available or self._accentor is None:
             return text
         try:
-            return self._model.process_all(text)
+            if self._backend == "silero-stress":
+                return self._accentor(text)
+            else:
+                return self._accentor.process_all(text)
         except Exception as exc:
-            logger.warning("ruaccent processing failed: %s", exc)
+            logger.warning("Stress processing failed: %s", exc)
             return text
 
     @property
     def available(self) -> bool:
-        """True if ruaccent loaded successfully."""
         return self._available

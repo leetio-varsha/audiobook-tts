@@ -1,13 +1,10 @@
-# TTS engine — Silero v4 (active) via torch.hub (no separate pip install needed)
-# XTTS v2 / Coqui TTS — commented out, kept for reference
-# TTS>=0.22.0
-# transformers>=4.36,<4.40
-
-# PyTorch — standard macOS wheel supports MPS (Metal)
+# TTS engines
+silero>=1.0.0
 torch>=2.1.0
 torchaudio>=2.1.0
 
-# Russian stress mark preprocessing (improves TTS accent placement)
+# Russian stress marks (primary: silero-stress, fallback: ruaccent)
+silero-stress>=1.0
 ruaccent>=1.5.0
 
 # FB2 parsing
@@ -25,6 +22,15 @@ gradio>=4.0.0
 
 # CLI progress
 tqdm>=4.65.0
+
+# RVC voice conversion (inference)
+rvc-python>=0.2.0
+
+# YouTube audio download
+yt-dlp>=2024.1.0
+
+# Audio I/O
+soundfile>=0.12.0
 
 # Utilities
 numpy>=1.24.0

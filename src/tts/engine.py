@@ -35,6 +35,12 @@ ENGINES = {
         "languages": ["ru"],
         "voice_cloning": True,
     },
+    "chatterbox": {
+        "name": "Chatterbox (voice cloning, MPS)",
+        "class": "src.tts.engine_chatterbox.ChatterboxEngine",
+        "languages": ["ru", "en", "de", "fr", "es", "it", "pt", "ja", "ko", "zh", "pl", "nl"],
+        "voice_cloning": True,
+    },
 }
 
 

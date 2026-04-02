@@ -37,6 +37,7 @@ SILERO_SPEAKERS = {
 TTS_ENGINES = {
     "Silero v5 — быстрый, 5 голосов": "silero",
     "F5-TTS — voice cloning": "f5tts",
+    "Chatterbox — voice cloning, MPS": "chatterbox",
 }
 
 LANGUAGES = {"Russian": "ru", "English": "en", "German": "de", "French": "fr", "Spanish": "es", "Italian": "it", "Portuguese": "pt", "Polish": "pl", "Turkish": "tr"}
@@ -143,6 +144,9 @@ def run_conversion(
                 engine_kwargs["ref_text"] = ref_text.strip()
             engine_kwargs["nfe_steps"] = int(nfe_steps)
             engine_kwargs["cfg_strength"] = float(cfg_strength)
+        elif engine_type == "chatterbox":
+            if ref_audio_file:
+                engine_kwargs["ref_audio"] = ref_audio_file
 
         engine = create_engine(engine_type, **engine_kwargs)
         chunker = TextChunker(max_words=int(max_words))
@@ -337,16 +341,19 @@ def build_ui() -> gr.Blocks:
 
                 # --- Handlers ---
                 def on_engine_change(engine_label):
-                    is_silero = TTS_ENGINES.get(engine_label, "silero") == "silero"
+                    et = TTS_ENGINES.get(engine_label, "silero")
+                    is_silero = et == "silero"
+                    is_f5 = et == "f5tts"
+                    has_voice_clone = et in ("f5tts", "chatterbox")
                     return (
                         gr.update(visible=is_silero),       # speaker
-                        gr.update(visible=not is_silero),   # ref_audio
-                        gr.update(visible=not is_silero),   # ref_text
-                        gr.update(visible=not is_silero),   # ref_yt_url
-                        gr.update(visible=not is_silero),   # ref_yt_btn
-                        gr.update(visible=not is_silero),   # nfe_steps
-                        gr.update(visible=not is_silero),   # cfg_strength
-                        gr.update(visible=is_silero),       # rvc_group
+                        gr.update(visible=has_voice_clone),  # ref_audio
+                        gr.update(visible=is_f5),            # ref_text (only F5-TTS needs it)
+                        gr.update(visible=has_voice_clone),  # ref_yt_url
+                        gr.update(visible=has_voice_clone),  # ref_yt_btn
+                        gr.update(visible=is_f5),            # nfe_steps (F5-TTS only)
+                        gr.update(visible=is_f5),            # cfg_strength (F5-TTS only)
+                        gr.update(visible=is_silero),        # rvc_group
                     )
 
                 engine_dropdown.change(

@@ -62,7 +62,10 @@ class RussianAccentuator:
             return False
 
     def process(self, text: str) -> str:
-        """Add stress marks to Russian text."""
+        """Add stress marks to Russian text.
+
+        Returns text with '+' before stressed vowels and restored 'ё'.
+        """
         if not self._available or self._accentor is None:
             return text
         try:
@@ -72,6 +75,22 @@ class RussianAccentuator:
                 return self._accentor.process_all(text)
         except Exception as exc:
             logger.warning("Stress processing failed: %s", exc)
+            return text
+
+    def restore_yo(self, text: str) -> str:
+        """Restore ё in Russian text without adding stress marks.
+
+        Useful for TTS engines that don't understand '+' stress notation
+        but benefit from correct ё placement (ё is always stressed).
+        """
+        if not self._available or self._accentor is None:
+            return text
+        try:
+            # Run full accentuation, then strip '+' marks
+            accented = self.process(text)
+            return accented.replace("+", "")
+        except Exception as exc:
+            logger.warning("Yo restoration failed: %s", exc)
             return text
 
     @property

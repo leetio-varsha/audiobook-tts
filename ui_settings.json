@@ -5,7 +5,9 @@
   "language": "Russian",
   "max_words": 400,
   "speech_speed": 0.9,
-  "engine": "Chatterbox — voice cloning, MPS",
+  "engine": "F5-TTS — voice cloning",
   "nfe_steps": 8,
-  "cfg_strength": 1.7
+  "cfg_strength": 2.0,
+  "model_variant": "Base 0.6B — voice cloning (дефолт)",
+  "enhance": true
 }

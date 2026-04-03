@@ -37,7 +37,7 @@ class ChatterboxEngine(BaseTTSEngine):
         self,
         ref_audio: Optional[str | Path] = None,
         language: str = "ru",
-        speech_speed: float = 1.0,
+        speech_speed: float = 0.85,
         exaggeration: float = 0.5,
         cfg_weight: float = 0.7,
         temperature: float = 0.65,

@@ -89,7 +89,12 @@ class BaseTTSEngine(ABC):
             text = self._normalizer.normalize(text)
 
         # Step 1: ruaccent preprocessing
-        text = self._accentuator.process(text)
+        # Engines that don't support '+' stress marks (e.g. Qwen3-TTS) set
+        # accent_mode = "yo_only" to restore ё without stress notation.
+        if getattr(self, 'accent_mode', 'full') == 'yo_only':
+            text = self._accentuator.restore_yo(text)
+        else:
+            text = self._accentuator.process(text)
 
         # Step 2: split into sub-chunks if too long
         sub_chunks = self._split_for_engine(text)

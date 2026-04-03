@@ -11,7 +11,7 @@ Personal tool for converting ebooks to audiobooks using local TTS models. No clo
 ## Stack
 
 - Language: Python 3.11+
-- TTS engines: Silero v4 (Russian, fast) / F5-TTS (Russian, voice cloning)
+- TTS engines: Silero v4 (Russian, fast) / F5-TTS (Russian, voice cloning) / Chatterbox (multilingual) / MLX-Chatterbox (Apple Silicon native) / Qwen3-TTS (MLX, multilingual)
 - Voice conversion: RVC (optional, Silero only)
 - Text preprocessing: ruaccent (stress marks) + custom normalizer (numbers, dates, abbreviations)
 - Audio post-processing: ffmpeg (EQ, compression, loudness normalization)
@@ -42,6 +42,10 @@ audiobook-tts/
 │   │   ├── engine.py    # Engine factory: create_engine("silero"|"f5tts")
 │   │   ├── engine_silero.py  # Silero v4 — fast, 5 Russian speakers
 │   │   ├── engine_f5tts.py   # F5-TTS — voice cloning, high quality
+│   │   ├── engine_mlx_f5tts.py   # F5-TTS via f5-tts-mlx — Apple Silicon native
+│   │   ├── engine_chatterbox.py  # Chatterbox — multilingual, PyTorch MPS
+│   │   ├── engine_mlx_chatterbox.py # Chatterbox via mlx-audio — Apple Silicon native
+│   │   ├── engine_qwen3tts.py    # Qwen3-TTS via mlx-audio — multilingual, voice cloning
 │   │   ├── chunker.py   # Sentence-boundary text chunker
 │   │   ├── normalizer.py # Russian text normalizer (numbers, dates, etc.)
 │   │   └── accentuator.py # ruaccent stress mark preprocessor
@@ -69,9 +73,24 @@ BaseTTSEngine (base.py) — shared pipeline:
   ├── SileroEngine — fast, 5 Russian speakers, no voice cloning
   │     Speakers: xenia (default), baya, kseniya, aidar, eugene
   │
-  └── F5TTSEngine — Misha24-10/F5-TTS_RUSSIAN, voice cloning from reference audio
-        Model: 1.3GB, auto-downloaded from HuggingFace
-        Reference audio: 5-8s WAV, auto-trimmed from middle
+  ├── F5TTSEngine — Misha24-10/F5-TTS_RUSSIAN, voice cloning from reference audio
+  │     Model: 1.3GB, auto-downloaded from HuggingFace
+  │     Reference audio: 5-8s WAV, auto-trimmed from middle
+  │
+  ├── MLXF5TTSEngine — F5-TTS via f5-tts-mlx, native Apple Silicon
+  │     Variants: russian (default), base, base-q4, base-q8
+  │     Same quality as F5TTSEngine but runs on Metal GPU, not CPU
+  │
+  ├── ChatterboxEngine — resemble-ai/chatterbox, multilingual, PyTorch MPS
+  │     550M params, voice cloning, 12 languages incl. Russian
+  │
+  ├── MLXChatterboxEngine — Chatterbox via mlx-audio, native Apple Silicon
+  │     Variants: turbo (134M, fast), full-q4 (550M quantized, Russian)
+  │     Uses MLX Metal acceleration instead of PyTorch MPS
+  │
+  └── Qwen3TTSEngine — Qwen3-TTS via mlx-audio, native Apple Silicon
+        Variants: base-0.6b (voice cloning, 10 langs), custom-1.7b, design-1.7b
+        Russian supported in base variant. Uses MLX Metal acceleration
 ```
 
 ## Usage

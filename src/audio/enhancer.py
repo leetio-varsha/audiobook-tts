@@ -7,10 +7,20 @@ Applied to each chapter WAV before M4B assembly.
 from __future__ import annotations
 
 import logging
+import os
 import subprocess
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
+
+
+def _ffmpeg_env() -> dict:
+    """Return env dict with Homebrew paths for ffmpeg."""
+    env = os.environ.copy()
+    for p in ("/opt/homebrew/bin", "/usr/local/bin"):
+        if p not in env.get("PATH", ""):
+            env["PATH"] = p + ":" + env.get("PATH", "")
+    return env
 
 
 class AudioEnhancer:
@@ -56,35 +66,27 @@ class AudioEnhancer:
         self.enabled = enabled
 
     def build_filter_chain(self) -> str:
-        """Build the ffmpeg audio filter chain string."""
+        """Build the ffmpeg audio filter chain string.
+
+        Kept minimal to avoid distortion — TTS audio is already clean.
+        Only high-pass (rumble) + gentle compressor + loudness normalization.
+        """
         filters = []
 
-        # 1. EQ: high-pass to remove low rumble
+        # 1. High-pass to remove low rumble
         filters.append(f"highpass=f={self.eq_low_cut}:poles=2")
 
-        # 2. EQ: reduce synthetic harshness in the presence band
-        filters.append(
-            f"equalizer=f={self.eq_presence_cut}:t=h:width=2000:g={self.eq_presence_db}"
-        )
-
-        # 3. De-essing: compress harsh sibilants
-        #    Split signal, compress the high band, recombine
-        filters.append(
-            f"bandreject=f={self.de_ess_freq}:width_type=h:w=1500,"
-            f"acompressor=threshold=-25dB:ratio=6:attack=0.3:release=50:makeup=1dB"
-        )
-
-        # 4. Main compressor: even out dynamics
+        # 2. Gentle compressor: even out dynamics between chunks
         filters.append(
             f"acompressor="
             f"threshold={self.compressor_threshold}dB:"
             f"ratio={self.compressor_ratio}:"
-            f"attack=5:"
-            f"release=100:"
-            f"makeup=2dB"
+            f"attack=10:"
+            f"release=200:"
+            f"makeup=1dB"
         )
 
-        # 5. Loudness normalization to target LUFS
+        # 3. Loudness normalization to target LUFS
         filters.append(
             f"loudnorm=I={self.target_lufs}:TP=-1.5:LRA=11:print_format=none"
         )
@@ -110,7 +112,7 @@ class AudioEnhancer:
             str(output_path),
         ]
 
-        result = subprocess.run(cmd, capture_output=True, text=True)
+        result = subprocess.run(cmd, capture_output=True, text=True, env=_ffmpeg_env())
         if result.returncode != 0:
             logger.error("Enhancer ffmpeg failed:\n%s", result.stderr[-1000:])
             raise RuntimeError(f"Audio enhancement failed: {result.stderr[-500:]}")

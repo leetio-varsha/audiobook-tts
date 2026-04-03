@@ -240,9 +240,10 @@ class RussianTextNormalizer:
         text = self._expand_abbreviations(text)       # After units
         text = self._expand_numbers(text)
         text = self._expand_symbols(text)
-        text = self._normalize_punctuation(text)
         text = self._clean_quotes_brackets(text)
+        text = self._normalize_punctuation(text)
         text = self._fix_hard_e(text)
+        text = self._pad_short_exclamations(text)
         text = self._collapse_whitespace(text)
         return text.strip()
 
@@ -265,15 +266,15 @@ class RussianTextNormalizer:
         """Expand common abbreviations."""
         # Sort by length (longest first) to avoid partial matches
         for abbr, expansion in sorted(ABBREVIATIONS.items(), key=lambda x: -len(x[0])):
-            # Single-letter abbreviations like "г." and "в." need a word boundary
-            # or whitespace before them to avoid matching inside words
-            # (e.g. "деревьев." should NOT match "в." → "века")
             escaped = re.escape(abbr)
             if len(abbr) <= 2:
-                pattern = r"(?<!\S)" + escaped + r"(?!\S)"
+                # Single-letter abbrevs like "г." and "в." — only expand when
+                # preceded by whitespace AND not preceded by uppercase (initial).
+                # No IGNORECASE here — "г." != "Г." (initial)
+                pattern = r"(?<=\s)" + escaped + r"(?!\s*[А-ЯЁA-Z])"
+                text = re.sub(pattern, expansion, text)
             else:
-                pattern = escaped
-            text = re.sub(pattern, expansion, text, flags=re.IGNORECASE | re.MULTILINE)
+                text = re.sub(escaped, expansion, text, flags=re.IGNORECASE)
         return text
 
     def _expand_acronyms(self, text: str) -> str:
@@ -406,8 +407,9 @@ class RussianTextNormalizer:
         """42 км → сорок два километров."""
         # Sort units by length (longest first) to match "км/ч" before "км" before "м"
         for unit, spoken in sorted(UNITS.items(), key=lambda x: -len(x[0])):
-            # Require the unit to NOT be followed by a letter (prevent "кг" matching in "кгода")
-            pattern = r"(\d+(?:[.,]\d+)?)\s*" + re.escape(unit) + r"(?![а-яёА-ЯЁa-zA-Z])"
+            # Require the unit to NOT be followed by a letter or dot
+            # (dot means abbreviation like "г." = года, not грамм)
+            pattern = r"(\d+(?:[.,]\d+)?)\s*" + re.escape(unit) + r"(?![а-яёА-ЯЁa-zA-Z.])"
             def _repl(m: re.Match, spoken=spoken) -> str:
                 try:
                     n = m.group(1).replace(",", ".")
@@ -469,7 +471,37 @@ class RussianTextNormalizer:
         # Multiple exclamation/question marks → single
         text = re.sub(r"!{2,}", "!", text)
         text = re.sub(r"\?{2,}", "?", text)
-        # Em dash in dialogue → comma (natural pause)
+
+        # Dialogue attribution after speech:
+        # "Я пришёл." — сказал он. → Я пришёл. ... сказал он.
+        # "Я пришёл" — сказал он. → Я пришёл... сказал он.
+        _SPEECH_VERBS = (
+            r'сказал|ответил|спросил|произнёс|произнес|прошептал|'
+            r'воскликнул|пробормотал|крикнул|добавил|продолжил|заметил|'
+            r'подумал|решил|согласился|возразил|проговорил|промолвил|'
+            r'буркнул|вздохнул|усмехнул|рассмеял|нахмурил|покачал|кивнул|'
+            r'рявкнул|зарычал|заявил|взревел|прорычал|простонал|выпалил|'
+            r'отрезал|огрызнул|фыркнул|хмыкнул|процедил|пролепетал|'
+            r'прошипел|выдохнул|застонал|взмолил|пробурчал'
+        )
+        # Case 1: speech ends with .!?… — add pause
+        text = re.sub(
+            r'([.!?…])\s*[—–]\s*(' + _SPEECH_VERBS + r')',
+            r'\1 ... \2',
+            text, flags=re.IGNORECASE,
+        )
+        # Case 2: speech ends without punctuation before dash
+        text = re.sub(
+            r'([а-яёА-ЯЁ])\s*[—–]\s*(' + _SPEECH_VERBS + r')',
+            r'\1... \2',
+            text, flags=re.IGNORECASE,
+        )
+
+        # Dialogue-opening dash at the start of text/line: just remove
+        text = re.sub(r"(^|\n)\s*[—–]\s*", r"\1", text)
+        # Dash after comma/colon → just remove the dash (comma is enough pause)
+        text = re.sub(r"([,;:])\s*[—–]\s*", r"\1 ", text)
+        # Other em dashes (mid-sentence): keep as comma for a slight pause
         text = re.sub(r"\s*[—–]\s*", ", ", text)
         return text
 
@@ -511,6 +543,13 @@ class RussianTextNormalizer:
     # ------------------------------------------------------------------
     # Whitespace
     # ------------------------------------------------------------------
+
+    def _pad_short_exclamations(self, text: str) -> str:
+        """Leave short exclamations as-is — TTS handles them naturally enough.
+
+        Previous doubling ('Ха!' → 'Ха-ха!') sounded unnatural.
+        """
+        return text
 
     def _collapse_whitespace(self, text: str) -> str:
         """Collapse multiple spaces/newlines and normalize special whitespace."""

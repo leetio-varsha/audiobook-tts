@@ -27,6 +27,15 @@ from src.audio.enhancer import AudioEnhancer
 logger = logging.getLogger(__name__)
 
 
+def _ffmpeg_env() -> dict:
+    """Return env dict with Homebrew paths for ffmpeg/ffprobe."""
+    env = os.environ.copy()
+    for p in ("/opt/homebrew/bin", "/usr/local/bin"):
+        if p not in env.get("PATH", ""):
+            env["PATH"] = p + ":" + env.get("PATH", "")
+    return env
+
+
 class AudioBuilder:
     """Build an M4B audiobook from per-chunk WAV files.
 
@@ -240,6 +249,7 @@ class AudioBuilder:
             capture_output=True,
             text=True,
             check=True,
+            env=_ffmpeg_env(),
         )
         duration_sec = float(result.stdout.strip())
         return int(duration_sec * 1000)
@@ -318,6 +328,7 @@ class AudioBuilder:
             cmd,
             capture_output=True,
             text=True,
+            env=_ffmpeg_env(),
         )
         if result.returncode != 0:
             logger.error("ffmpeg stderr:\n%s", result.stderr)

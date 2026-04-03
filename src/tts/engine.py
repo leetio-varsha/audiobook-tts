@@ -41,6 +41,18 @@ ENGINES = {
         "languages": ["ru", "en", "de", "fr", "es", "it", "pt", "ja", "ko", "zh", "pl", "nl"],
         "voice_cloning": True,
     },
+    "mlx-chatterbox": {
+        "name": "MLX Chatterbox (Apple Silicon, voice cloning)",
+        "class": "src.tts.engine_mlx_chatterbox.MLXChatterboxEngine",
+        "languages": ["ru", "en", "de", "fr", "es", "it", "pt", "ja", "ko", "zh", "pl", "nl"],
+        "voice_cloning": True,
+    },
+    "qwen3tts": {
+        "name": "Qwen3-TTS (MLX, multilingual, voice cloning)",
+        "class": "src.tts.engine_qwen3tts.Qwen3TTSEngine",
+        "languages": ["ru", "en", "zh", "ja", "ko", "de", "fr", "pt", "es", "it"],
+        "voice_cloning": True,
+    },
 }
 
 

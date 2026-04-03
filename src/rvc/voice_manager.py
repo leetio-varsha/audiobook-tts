@@ -51,8 +51,13 @@ class VoiceManager:
         raw_path = samples_dir / "youtube_raw.%(ext)s"
         out_path = samples_dir / "youtube.wav"
 
+        # Use yt-dlp from venv if available
+        import sys
+        venv_ytdlp = Path(sys.executable).parent / "yt-dlp"
+        ytdlp_bin = str(venv_ytdlp) if venv_ytdlp.exists() else "yt-dlp"
+
         cmd = [
-            "yt-dlp",
+            ytdlp_bin,
             "-x", "--audio-format", "wav",
             "--audio-quality", "0",
             "-o", str(raw_path),

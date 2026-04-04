@@ -55,3 +55,6 @@ tools/
 
 # Logs
 *.log
+.claude/
+llmdebug.db
+*.db

@@ -22,6 +22,10 @@ logger = logging.getLogger(__name__)
 _HF_CKPT = "hf://Misha24-10/F5-TTS_RUSSIAN/F5TTS_v1_Base_v2/model_last_inference.safetensors"
 _HF_VOCAB = "hf://Misha24-10/F5-TTS_RUSSIAN/F5TTS_v1_Base/vocab.txt"
 
+# hotstone228 — trained on 100k hours, potentially better stress handling
+_HF_CKPT_HOTSTONE = "hf://hotstone228/F5-TTS-Russian/model_last.safetensors"
+_HF_VOCAB_HOTSTONE = "hf://hotstone228/F5-TTS-Russian/vocab.txt"
+
 _DEFAULT_REF_TEXT = "Привет, это пример моего голоса для аудиокниги."
 _mlx_whisper_model = None
 
@@ -71,8 +75,8 @@ class F5TTSEngine(BaseTTSEngine):
         ref_audio: Optional[str | Path] = None,
         ref_text: str = "",
         language: str = "ru",
-        speech_speed: float = 1.0,
-        nfe_steps: int = 4,
+        speech_speed: float = 0.85,
+        nfe_steps: int = 32,
         cfg_strength: float = 2.0,
         ckpt_file: str = _HF_CKPT,
         vocab_file: str = _HF_VOCAB,
@@ -86,6 +90,10 @@ class F5TTSEngine(BaseTTSEngine):
 
         import os, torch
         os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
+        # Ensure ffmpeg is on PATH for pydub (used by F5-TTS preprocess)
+        for p in ("/opt/homebrew/bin", "/usr/local/bin"):
+            if p not in os.environ.get("PATH", ""):
+                os.environ["PATH"] = p + ":" + os.environ.get("PATH", "")
         torch.set_num_threads(os.cpu_count() or 12)
         _force_torchaudio_soundfile_backend()
 
@@ -128,17 +136,58 @@ class F5TTSEngine(BaseTTSEngine):
         self._preprocess_ref()
         logger.info("Using ref audio: %s (max_chars=%d)", self.ref_audio, self.max_chunk_chars)
 
+    def _normalize_ref_audio(self, src: str) -> str:
+        """Resample reference audio to 24kHz and trim to 8-12s.
+
+        F5-TTS is sensitive to sample rate — reference audio at anything other
+        than 24kHz causes pitch shift in the synthesized output (chipmunk effect).
+        Also trim long files to 8-12s of clean speech from the middle to avoid
+        silence/noise at the start.
+        """
+        import torchaudio as ta
+
+        audio, sr = sf.read(src)
+        if audio.ndim > 1:
+            audio = audio.mean(axis=1)
+
+        target_sr = 24000
+        target_dur_sec = 10.0  # ideal reference duration for F5-TTS
+
+        # Resample if needed
+        if sr != target_sr:
+            logger.info("Resampling reference audio %dHz → %dHz", sr, target_sr)
+            import torch
+            t = torch.from_numpy(audio.astype(np.float32)).unsqueeze(0)
+            resampler = ta.transforms.Resample(orig_freq=sr, new_freq=target_sr)
+            audio = resampler(t).squeeze(0).numpy()
+            sr = target_sr
+
+        # Trim to target_dur_sec from the middle of the file (avoids intros/outros)
+        max_samples = int(target_dur_sec * sr)
+        if len(audio) > max_samples:
+            start = (len(audio) - max_samples) // 2
+            audio = audio[start: start + max_samples]
+            logger.info("Trimmed reference to %.1fs from middle", target_dur_sec)
+
+        # Save normalized reference to temp file
+        tmp = tempfile.mktemp(suffix="_ref24k.wav", prefix="f5_")
+        sf.write(tmp, audio.astype(np.float32), sr)
+        return tmp
+
     def _preprocess_ref(self) -> None:
         """Preprocess reference audio and compute dynamic max_chars.
 
-        Uses F5-TTS's own preprocessing which handles:
-        - Audio trimming to ≤12s (silence-based)
-        - Internal transcription if ref_text is empty
+        1. Resample to 24kHz + trim to 10s (our step — avoids SR mismatch)
+        2. F5-TTS's own preprocessing: silence trim + transcription
         """
         from f5_tts.infer.utils_infer import preprocess_ref_audio_text
 
+        # Step 1: normalize SR and duration before F5-TTS sees it
+        normalized_ref = self._normalize_ref_audio(self.ref_audio)
+
+        # Step 2: let F5-TTS handle silence trimming and auto-transcription
         self._ref_file, self.ref_text = preprocess_ref_audio_text(
-            self.ref_audio, self.ref_text, show_info=logger.info,
+            normalized_ref, self.ref_text, show_info=logger.info,
         )
         # Compute max_chars based on ref audio duration
         audio, sr = sf.read(self._ref_file)
@@ -165,18 +214,22 @@ class F5TTSEngine(BaseTTSEngine):
         return True
 
     @staticmethod
-    def _strip_stress_marks(text: str) -> str:
-        """Strip stress marks. Keeps ё restoration from ruaccent."""
-        text = text.replace("+", "")
-        text = text.replace("\u0301", "")
-        return text
+    def _prepare_text_for_f5(text: str) -> str:
+        """Prepare text for F5-TTS Russian.
+
+        Keeps '+' stress marks — Misha24-10 vocab includes '+' and the model
+        was trained with stress notation. Removing '+' causes wrong stress.
+        Only strips combining Unicode acute (U+0301) to avoid double-marking
+        if both formats are present simultaneously.
+        """
+        return text.replace("\u0301", "")
 
     def _synthesize_chunk(self, text: str) -> np.ndarray:
         """Synthesize text using F5-TTS.
 
         Uses self._f5.infer() — the original F5-TTS API path.
         """
-        attempt_text = self._strip_stress_marks(text)
+        attempt_text = self._prepare_text_for_f5(text)
 
         for attempt in range(3):
             try:

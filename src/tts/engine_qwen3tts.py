@@ -70,7 +70,7 @@ class Qwen3TTSEngine(BaseTTSEngine):
         model_variant: str = DEFAULT_VARIANT,
         speaker: str = "",
         instruct: str = "",
-        mastering: bool = False,
+        mastering: bool = True,
         **kwargs,
     ):
         # Disable base-class accent/normalizer — Qwen3 handles prosody itself

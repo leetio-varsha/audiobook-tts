@@ -6,7 +6,7 @@
   "max_words": 400,
   "speech_speed": 0.9,
   "engine": "F5-TTS — voice cloning",
-  "nfe_steps": 8,
+  "nfe_steps": 32,
   "cfg_strength": 2.0,
   "model_variant": "Base 0.6B — voice cloning (дефолт)",
   "enhance": true

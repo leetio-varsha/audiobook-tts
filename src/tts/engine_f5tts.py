@@ -19,7 +19,7 @@ from src.tts.base import BaseTTSEngine, SAMPLE_RATE
 
 logger = logging.getLogger(__name__)
 
-_HF_CKPT = "hf://Misha24-10/F5-TTS_RUSSIAN/F5TTS_v1_Base_v2/model_last_inference.safetensors"
+_HF_CKPT = "hf://Misha24-10/F5-TTS_RUSSIAN/F5TTS_v1_Base_v4_winter/model_212000.safetensors"
 _HF_VOCAB = "hf://Misha24-10/F5-TTS_RUSSIAN/F5TTS_v1_Base/vocab.txt"
 
 _DEFAULT_REF_TEXT = "Привет, это пример моего голоса для аудиокниги."

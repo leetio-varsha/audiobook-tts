@@ -5,11 +5,17 @@ Three model variants:
   - base-0.6b   — lightweight, voice cloning, 10 languages incl. Russian
   - custom-1.7b — predefined speakers with emotion control
   - design-1.7b — voice design from text description
+
+Russian stress pipeline (src.text.stress):
+  Overrides → OpenRussian dict (397k) → pymorphy3 lemma → silero-stress
+  Stress marks are converted to Unicode combining acute (U+0301) which
+  Qwen3-TTS, being an LLM, can interpret as standard Russian diacritics.
 """
 
 from __future__ import annotations
 
 import logging
+import re
 from pathlib import Path
 from typing import Optional
 
@@ -18,6 +24,29 @@ import numpy as np
 from src.tts.base import BaseTTSEngine, SAMPLE_RATE
 
 logger = logging.getLogger(__name__)
+
+_VOWELS = "аеёиоуыэюяАЕЁИОУЫЭЮЯ"
+
+
+def _plus_to_acute(text: str) -> str:
+    """Convert '+' stress marks to Unicode combining acute accent (U+0301).
+
+    з+амок → за́мок  (acute placed after the stressed vowel)
+
+    Qwen3-TTS is LLM-based and understands standard Russian diacritics
+    used in dictionaries/textbooks, but not the '+' TTS convention.
+    """
+    result = []
+    i = 0
+    while i < len(text):
+        if text[i] == "+" and i + 1 < len(text) and text[i + 1] in _VOWELS:
+            result.append(text[i + 1])   # stressed vowel
+            result.append("\u0301")       # combining acute accent
+            i += 2
+        else:
+            result.append(text[i])
+            i += 1
+    return "".join(result)
 
 # Available MLX model variants
 _MODEL_VARIANTS = {
@@ -55,22 +84,28 @@ class Qwen3TTSEngine(BaseTTSEngine):
         ref_audio: Optional[str | Path] = None,
         ref_text: str = "",
         language: str = "ru",
-        speech_speed: float = 0.92,
+        speech_speed: float = 0.9,
         model_variant: str = DEFAULT_VARIANT,
         speaker: str = "",
         instruct: str = "",
         **kwargs,
     ):
+        # Pass speech_speed=1.0 to base — we handle speed natively via model param.
         super().__init__(
             language=language,
-            speech_speed=speech_speed,
+            speech_speed=1.0,
             max_chunk_chars=self.MAX_CHUNK_CHARS,
             **kwargs,
         )
-        # Qwen3-TTS doesn't understand '+' stress marks — only restore ё
+        # Native speed passed directly to model.generate(speed=...)
+        self._native_speed = speech_speed
+
+        # Base class only restores ё (no '+' marks — those confuse Qwen3's tokenizer).
+        # Full stress pipeline runs in _synthesize_chunk and converts to Unicode acute.
         self.accent_mode = "yo_only"
 
-        self.ref_audio = str(ref_audio) if ref_audio and Path(ref_audio).exists() else None
+        raw_ref = str(ref_audio) if ref_audio and Path(ref_audio).exists() else None
+        self.ref_audio = self._normalize_ref_audio(raw_ref) if raw_ref else None
         self.ref_text = ref_text
         self.model_variant = model_variant
         self.speaker = speaker
@@ -82,7 +117,12 @@ class Qwen3TTSEngine(BaseTTSEngine):
         from mlx_audio.tts.utils import load_model
         self._model = load_model(model_id)
 
-        logger.info("Qwen3-TTS loaded (variant=%s)", model_variant)
+        # Load stress pipeline
+        from src.text.stress import RussianStressPipeline
+        self._stress = RussianStressPipeline()
+        self._stress.load()
+
+        logger.info("Qwen3-TTS loaded (variant=%s, speed=%.2f)", model_variant, self._native_speed)
 
     @property
     def engine_name(self) -> str:
@@ -92,29 +132,73 @@ class Qwen3TTSEngine(BaseTTSEngine):
     def supports_voice_cloning(self) -> bool:
         return self.model_variant.startswith("base")
 
+    @staticmethod
+    def _normalize_ref_audio(src: str, target_sr: int = 24000, target_sec: float = 10.0) -> str:
+        """Resample reference to 24kHz and trim to 10s from the middle.
+
+        Qwen3-TTS allocates memory proportional to the reference duration —
+        passing a multi-hour file causes OOM (71GB+ allocation attempt).
+        """
+        import tempfile
+        import soundfile as sf_local
+        import numpy as np_local
+
+        audio, sr = sf_local.read(src)
+        if audio.ndim > 1:
+            audio = audio.mean(axis=1)
+
+        if sr != target_sr:
+            import torchaudio as ta
+            import torch as th
+            t = th.from_numpy(audio.astype(np.float32)).unsqueeze(0)
+            audio = ta.transforms.Resample(sr, target_sr)(t).squeeze(0).numpy()
+            sr = target_sr
+
+        max_samples = int(target_sec * sr)
+        if len(audio) > max_samples:
+            start = (len(audio) - max_samples) // 2
+            audio = audio[start: start + max_samples]
+
+        tmp = tempfile.mktemp(suffix="_qwen_ref.wav", prefix="q3_")
+        sf_local.write(tmp, audio.astype(np.float32), sr)
+        logger.info("Qwen3 ref audio: normalized to %.1fs at %dHz → %s", target_sec, sr, tmp)
+        return tmp
+
     def _synthesize_chunk(self, text: str) -> np.ndarray:
-        """Synthesize a single chunk via mlx-audio Qwen3-TTS."""
-        # accent_mode="yo_only" ensures text arrives with ё restored
-        # but without '+' stress marks that confuse the tokenizer.
+        """Synthesize a single chunk via mlx-audio Qwen3-TTS.
+
+        Text arrives pre-processed by base.py pipeline (normalizer + accentuator).
+        We run it through the stress pipeline then convert '+' marks to Unicode
+        acute accents before passing to the LLM-based model.
+        """
+        # text already has ё restored by base class (accent_mode="yo_only").
+        # Run stress pipeline (dict + silero) and convert '+' to Unicode acute.
+        # '+' marks must NOT reach Qwen3's tokenizer — they cause OOM.
+        stressed = self._stress.process(text)
+        qwen_text = _plus_to_acute(stressed)
+
         try:
             if self.model_variant.startswith("custom"):
                 results = list(self._model.generate_custom_voice(
-                    text=text,
+                    text=qwen_text,
                     speaker=self.speaker or "Serena",
                     language=self._qwen_language(),
                     instruct=self.instruct or "",
+                    speed=self._native_speed,
                 ))
             elif self.model_variant.startswith("design"):
                 results = list(self._model.generate_voice_design(
-                    text=text,
+                    text=qwen_text,
                     language=self._qwen_language(),
                     instruct=self.instruct or "A calm adult male voice with clear pronunciation.",
+                    speed=self._native_speed,
                 ))
             else:
                 # Base model — voice cloning via ref_audio
-                gen_kwargs = {
-                    "text": text,
-                    "lang_code": self._qwen_language().lower(),  # e.g. "russian", not "auto"
+                gen_kwargs: dict = {
+                    "text": qwen_text,
+                    "lang_code": self._qwen_language().lower(),
+                    "speed": self._native_speed,
                 }
                 if self.ref_audio:
                     gen_kwargs["ref_audio"] = self.ref_audio

@@ -140,3 +140,16 @@ Optional layer on top of Silero. Not needed with F5-TTS (has built-in voice clon
 - F5-TTS voice cloning: upload 5-12s WAV reference or extract from YouTube URL
 - ffmpeg required: `brew install ffmpeg`
 - Settings persist across sessions in `ui_settings.json`
+
+## Quality Checkpoints
+
+| Tag / Commit | Engine | Notes |
+|---|---|---|
+| `7ddf757` | F5-TTS (Misha24-10) | Best F5-TTS quality. NFE=32, speed=0.85, stress marks preserved (+), ref normalized to 24kHz/10s. |
+| `best-quality-v1` (`6388782`) | Qwen3-TTS base-0.6b | Best Qwen3 quality. Cinematic pipeline: semantic chunking, emotion pacing, direct model calls. Mastering disabled (loudnorm zeroes audio — fix pending). |
+
+**Qwen3-TTS key rules:**
+- Call `model.generate()` directly — base class preprocessing degrades quality
+- Pass clean Russian text (no stress marks, no normalizer)
+- Trim reference audio to 10s before passing (long refs → OOM)
+- Native `speed=` param only — no ffmpeg atempo

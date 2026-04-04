@@ -117,11 +117,6 @@ class Qwen3TTSEngine(BaseTTSEngine):
         from mlx_audio.tts.utils import load_model
         self._model = load_model(model_id)
 
-        # Load stress pipeline
-        from src.text.stress import RussianStressPipeline
-        self._stress = RussianStressPipeline()
-        self._stress.load()
-
         logger.info("Qwen3-TTS loaded (variant=%s, speed=%.2f)", model_variant, self._native_speed)
 
     @property
@@ -167,15 +162,12 @@ class Qwen3TTSEngine(BaseTTSEngine):
     def _synthesize_chunk(self, text: str) -> np.ndarray:
         """Synthesize a single chunk via mlx-audio Qwen3-TTS.
 
-        Text arrives pre-processed by base.py pipeline (normalizer + accentuator).
-        We run it through the stress pipeline then convert '+' marks to Unicode
-        acute accents before passing to the LLM-based model.
+        Qwen3-TTS is an LLM trained on clean text — explicit stress marks
+        (Unicode acute or '+') degrade quality. Pass plain text; the model
+        handles prosody internally.
+        Text arrives with ё restored by the base class (accent_mode="yo_only").
         """
-        # text already has ё restored by base class (accent_mode="yo_only").
-        # Run stress pipeline (dict + silero) and convert '+' to Unicode acute.
-        # '+' marks must NOT reach Qwen3's tokenizer — they cause OOM.
-        stressed = self._stress.process(text)
-        qwen_text = _plus_to_acute(stressed)
+        qwen_text = text
 
         try:
             if self.model_variant.startswith("custom"):

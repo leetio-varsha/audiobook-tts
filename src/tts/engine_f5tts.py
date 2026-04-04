@@ -19,7 +19,7 @@ from src.tts.base import BaseTTSEngine, SAMPLE_RATE
 
 logger = logging.getLogger(__name__)
 
-_HF_CKPT = "hf://Misha24-10/F5-TTS_RUSSIAN/F5TTS_v1_Base_v4_winter/model_212000.safetensors"
+_HF_CKPT = "hf://Misha24-10/F5-TTS_RUSSIAN/F5TTS_v1_Base_v2/model_last_inference.safetensors"
 _HF_VOCAB = "hf://Misha24-10/F5-TTS_RUSSIAN/F5TTS_v1_Base/vocab.txt"
 
 _DEFAULT_REF_TEXT = "Привет, это пример моего голоса для аудиокниги."
@@ -61,11 +61,9 @@ def _force_torchaudio_soundfile_backend() -> None:
 class F5TTSEngine(BaseTTSEngine):
     """F5-TTS Russian engine with voice cloning from reference audio.
 
-    Uses MPS (Apple Metal) for the main model and single-batch inference
-    to avoid F5-TTS's broken multi-batch processing.
+    Uses CPU for reliable inference (MPS causes tensor mismatches).
     """
 
-    # Will be overridden dynamically based on ref audio length
     MAX_CHUNK_CHARS = 150
 
     def __init__(
@@ -106,8 +104,6 @@ class F5TTSEngine(BaseTTSEngine):
         import torch
         from f5_tts.api import F5TTS
 
-        # MPS is unstable for F5-TTS (tensor mismatches in vocoder AND model).
-        # CPU is the only reliable option.
         self._device = "cpu"
 
         self._f5 = F5TTS(
@@ -118,7 +114,7 @@ class F5TTSEngine(BaseTTSEngine):
         )
         logger.info("F5-TTS loaded on CPU (NFE=%d)", self.nfe_steps)
 
-        # Prepare reference audio and compute dynamic max_chars
+        # Prepare reference audio
         if ref_audio and Path(ref_audio).exists():
             self.ref_audio = str(Path(ref_audio))
         else:
@@ -126,113 +122,39 @@ class F5TTSEngine(BaseTTSEngine):
             self.ref_audio = self._generate_default_ref()
             self.ref_text = _DEFAULT_REF_TEXT
 
-        # IMPORTANT: preprocess (trim to ~12s) BEFORE transcription.
-        # Otherwise Whisper transcribes the full file (e.g. 180s) but F5-TTS
-        # only uses 12s of audio → ref_text/ref_audio mismatch → tensor errors.
-        self._preprocess_ref_audio()
+        # Let F5-TTS handle its own preprocessing (trim, silence, transcription).
+        # This is the original working path — F5-TTS knows best how to prepare
+        # its own ref audio/text pair.
+        self._preprocess_ref()
+        logger.info("Using ref audio: %s (max_chars=%d)", self.ref_audio, self.max_chunk_chars)
 
-        if not self.ref_text.strip():
-            logger.info("No reference text provided, transcribing trimmed ref audio...")
-            self.ref_text = self._transcribe_ref_audio(self._ref_file)
+    def _preprocess_ref(self) -> None:
+        """Preprocess reference audio and compute dynamic max_chars.
 
-        # Sanity check: ref_text should be reasonable for audio length.
-        # Russian speech ≈ 12-15 chars/sec. If ref_text is too short,
-        # F5-TTS computes absurd duration ratios → 60+s per chunk.
-        ref_data, ref_sr = sf.read(self._ref_file)
-        ref_dur = len(ref_data) / ref_sr
-        ref_chars = len(self.ref_text.encode("utf-8"))
-        chars_per_sec = ref_chars / max(ref_dur, 0.1)
-        if chars_per_sec < 3.0:  # Less than 3 chars/sec = something wrong
-            logger.warning(
-                "Suspiciously short ref_text (%d chars for %.1fs audio, %.1f ch/s). "
-                "Falling back to Silero-generated reference.",
-                ref_chars, ref_dur, chars_per_sec,
-            )
-            self.ref_audio = self._generate_default_ref()
-            self.ref_text = _DEFAULT_REF_TEXT
-            self._preprocess_ref_audio()
-
-        self._finalize_ref()
-        logger.info("Using ref audio: %s (max_chars=%d)", self._ref_file, self.max_chunk_chars)
-
-    def _preprocess_ref_audio(self) -> None:
-        """Trim and preprocess reference audio (silence removal, 12s cap).
-
-        For long files (>15s), extracts from the middle where actual speech
-        is most likely, avoiding intros/titles/music at the start.
-        Must be called BEFORE transcription so Whisper only sees the trimmed clip.
+        Uses F5-TTS's own preprocessing which handles:
+        - Audio trimming to ≤12s (silence-based)
+        - Internal transcription if ref_text is empty
         """
-        # For long files, trim from the middle first
-        audio_data, sr = sf.read(self.ref_audio)
-        duration = len(audio_data) / sr
-        if duration > 15:
-            logger.info("Long ref audio (%.1fs), extracting 10s from middle...", duration)
-            mid = len(audio_data) // 2
-            half = int(sr * 5)  # 5s each side = 10s total
-            trimmed = audio_data[max(0, mid - half):mid + half]
-            import tempfile
-            tmp = tempfile.mktemp(suffix=".wav", prefix="f5ref_mid_")
-            sf.write(tmp, trimmed, sr)
-            self.ref_audio = tmp
-
         from f5_tts.infer.utils_infer import preprocess_ref_audio_text
 
-        self._ref_file, _ = preprocess_ref_audio_text(
-            self.ref_audio, self.ref_text or "placeholder", show_info=logger.info,
+        self._ref_file, self.ref_text = preprocess_ref_audio_text(
+            self.ref_audio, self.ref_text, show_info=logger.info,
         )
-
-    def _finalize_ref(self) -> None:
-        """Compute dynamic max_chars after both ref audio and text are ready."""
-        # Ensure ref_text ends properly (F5-TTS expects trailing period+space)
-        if not self.ref_text.endswith(". ") and not self.ref_text.endswith("。"):
-            if self.ref_text.endswith("."):
-                self.ref_text += " "
-            else:
-                self.ref_text += ". "
-
+        # Compute max_chars based on ref audio duration
         audio, sr = sf.read(self._ref_file)
         if getattr(audio, "ndim", 1) > 1:
             audio = audio.mean(axis=1)
         ref_duration = len(audio) / sr
         ref_text_len = len(self.ref_text.encode("utf-8"))
-        # F5-TTS context window is ~22s total (ref + gen)
         available_duration = 22 - ref_duration
         if available_duration > 0 and ref_duration > 0:
             chars_per_sec = ref_text_len / ref_duration
             computed = int(chars_per_sec * available_duration * 0.85)
-            # Cap to sane range: [80, 250]. Too high → long generation; too low → choppy.
             self.max_chunk_chars = max(80, min(computed, 250))
         else:
             self.max_chunk_chars = 100
         logger.info("Dynamic max_chars=%d (ref: %.1fs, text: %d chars, available: %.1fs)",
                      self.max_chunk_chars, ref_duration, ref_text_len, available_duration)
-
-    def _transcribe_ref_audio(self, ref_audio: str) -> str:
-        """Transcribe reference audio with MLX Whisper.
-
-        This avoids transformers/torchcodec, which became fragile in the
-        current environment after MLX-related dependency changes.
-        """
-        global _mlx_whisper_model
-
-        if _mlx_whisper_model is None:
-            from mlx_audio.stt import load as load_stt_model
-
-            logger.info("Loading MLX Whisper for reference transcription...")
-            _mlx_whisper_model = load_stt_model("mlx-community/whisper-large-v3-turbo-asr-fp16")
-
-        result = _mlx_whisper_model.generate(
-            ref_audio,
-            language="ru",
-            task="transcribe",
-            return_timestamps=False,
-            condition_on_previous_text=False,
-            verbose=False,
-        )
-        text = getattr(result, "text", "") or ""
-        text = text.strip()
-        logger.info("Reference transcription: %s", text)
-        return text
 
     @property
     def engine_name(self) -> str:
@@ -250,49 +172,25 @@ class F5TTSEngine(BaseTTSEngine):
         return text
 
     def _synthesize_chunk(self, text: str) -> np.ndarray:
-        """Synthesize text using F5-TTS single-batch inference.
+        """Synthesize text using F5-TTS.
 
-        Bypasses F5-TTS's internal chunking by calling infer_batch_process
-        directly with a single batch. F5-TTS's infer() recalculates max_chars
-        from ref_text/ref_audio ratio and may split to multiple batches which
-        then fail with tensor dimension mismatches on CPU.
+        Uses self._f5.infer() — the original F5-TTS API path.
         """
-        import torch
-
         attempt_text = self._strip_stress_marks(text)
-
-        # Load ref audio once for direct batch call
-        audio_ref, sr_ref = torchaudio.load(self._ref_file)
 
         for attempt in range(3):
             try:
-                from f5_tts.infer.utils_infer import infer_batch_process
-
-                # Single-batch: bypass F5-TTS internal chunking entirely
-                result = next(infer_batch_process(
-                    (audio_ref, sr_ref),
-                    self.ref_text,
-                    [attempt_text],  # single batch — no internal splitting
-                    self._f5.ema_model,
-                    self._f5.vocoder,
-                    mel_spec_type=self._f5.mel_spec_type,
+                wav, sr, _ = self._f5.infer(
+                    ref_file=self._ref_file,
+                    ref_text=self.ref_text,
+                    gen_text=attempt_text,
                     nfe_step=self.nfe_steps,
                     cfg_strength=self.cfg_strength,
                     sway_sampling_coef=-1.0,
-                    speed=1.0,  # speed handled by BaseTTSEngine
-                    device=self._device,
-                ))
-
-                wav, sr, _ = result
-
-                if wav is None:
-                    logger.warning("F5-TTS returned None, retrying")
-                    continue
-
-                # Validate output
+                )
                 if not isinstance(wav, np.ndarray):
                     wav = wav.cpu().numpy()
-                if len(wav) < sr * 0.1:  # less than 0.1s = probably failed
+                if len(wav) < sr * 0.1:
                     logger.warning("F5-TTS output too short (%d samples), retrying", len(wav))
                     continue
                 break
@@ -300,7 +198,6 @@ class F5TTSEngine(BaseTTSEngine):
                 err_msg = str(e).lower()
                 logger.warning("F5-TTS attempt %d failed: %s", attempt + 1, e)
                 if "size" in err_msg or "dimension" in err_msg or "mismatch" in err_msg:
-                    # Reduce text for retry
                     attempt_text = attempt_text[:len(attempt_text) * 2 // 3]
                     for sep in (". ", "! ", "? ", ", "):
                         idx = attempt_text.rfind(sep)
@@ -329,10 +226,7 @@ class F5TTSEngine(BaseTTSEngine):
         """Set reference audio for voice cloning."""
         self.ref_audio = str(ref_audio)
         self.ref_text = ref_text
-        self._preprocess_ref_audio()
-        if not self.ref_text.strip():
-            self.ref_text = self._transcribe_ref_audio(self._ref_file)
-        self._finalize_ref()
+        self._preprocess_ref()
 
     @staticmethod
     def _generate_default_ref() -> str:

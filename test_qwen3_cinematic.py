@@ -46,7 +46,7 @@ TEST_TEXT = """
 REF_AUDIO = "voices/Buldakov/samples/youtube.wav"
 OUTPUT_DIR = Path("output")
 OUTPUT_DIR.mkdir(exist_ok=True)
-OUTPUT_WAV = OUTPUT_DIR / "test_qwen3tts_cinematic.wav"
+OUTPUT_WAV = OUTPUT_DIR / "test_qwen3tts_cinematic_raw.wav"
 
 
 def show_chunks(text: str) -> None:
@@ -89,7 +89,7 @@ def main():
         ref_audio=REF_AUDIO,
         speech_speed=0.85,
         model_variant="base-0.6b",
-        mastering=True,
+        mastering=False,
     )
     logger.info("Engine loaded in %.1fs", time.time() - t_load)
 

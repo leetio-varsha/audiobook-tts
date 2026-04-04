@@ -111,9 +111,10 @@ class Qwen3TTSEngine(BaseTTSEngine):
         self._classifier = EmotionClassifier(base_speed=speech_speed)
         self._mastering = (MasteringPipeline() if (mastering and not fast_mode) else None)
 
-        # Prepare reference audio (trim to 10s — prevents OOM on long files)
+        # Prepare reference audio (trim to 10s, preload as mx.array — prevents
+        # OOM on long files AND eliminates per-chunk disk reads)
         if ref_audio and Path(ref_audio).exists():
-            self.ref_audio = self._normalize_ref_audio(str(ref_audio))
+            self.ref_audio = self._load_ref_as_array(str(ref_audio))
         else:
             self.ref_audio = None
         self.ref_text = ref_text
@@ -149,7 +150,7 @@ class Qwen3TTSEngine(BaseTTSEngine):
                 text="Раз.",
                 lang_code=self._lang.lower(),
                 speed=self._native_speed,
-                **({"ref_audio": self.ref_audio} if self.ref_audio else {}),
+                **({"ref_audio": self.ref_audio} if self.ref_audio is not None else {}),
             ))
             # Discard warmup output — we only care about Metal being warm
             _ = dummy
@@ -300,7 +301,7 @@ class Qwen3TTSEngine(BaseTTSEngine):
                     "lang_code": self._lang.lower(),
                     "speed": emotion.speed,
                 }
-                if self.ref_audio:
+                if self.ref_audio is not None:
                     gen_kwargs["ref_audio"] = self.ref_audio
                 if self.ref_text:
                     gen_kwargs["ref_text"] = self.ref_text
@@ -347,12 +348,16 @@ class Qwen3TTSEngine(BaseTTSEngine):
     # Reference audio normalization (OOM prevention)
     # ------------------------------------------------------------------
 
-    def _normalize_ref_audio(self, src: str) -> str:
-        """Trim reference audio to 10s from the middle.
+    def _load_ref_as_array(self, src: str):
+        """Load reference audio as mx.array (trim to 10s, mono, 24kHz).
 
-        Qwen3-TTS is an LLM — a 41k-second reference causes OOM.
-        No resampling: Qwen3 handles sample rate internally.
+        Passing mx.array to model.generate() skips the per-chunk disk read that
+        mlx-audio performs when given a file path — saves ~1.3s per chunk.
+        OOM prevention: Qwen3 is an LLM; a 41k-second reference → 71GB malloc.
         """
+        import mlx.core as mx
+        from mlx_audio.utils import load_audio as mlx_load_audio
+
         audio, sr = sf.read(src)
         if audio.ndim > 1:
             audio = audio.mean(axis=1)
@@ -363,12 +368,26 @@ class Qwen3TTSEngine(BaseTTSEngine):
             audio = audio[start: start + target_samples]
             logger.info("Trimmed reference to 10s from middle (source: %s)", src)
 
+        # Write trimmed audio to a temp file so mlx_load_audio can resample
+        # to 24kHz (required by the speaker encoder) — one-time cost at init
         with tempfile.NamedTemporaryFile(
             suffix="_ref_qwen3.wav", prefix="qwen3_", delete=False
         ) as f:
             tmp_path = f.name
-        sf.write(tmp_path, audio.astype(np.float32), sr)
-        return tmp_path
+        try:
+            sf.write(tmp_path, audio.astype(np.float32), sr)
+            ref_array = mlx_load_audio(tmp_path, sample_rate=24000)
+        finally:
+            try:
+                Path(tmp_path).unlink()
+            except OSError:
+                pass
+
+        logger.info(
+            "Ref audio preloaded as mx.array: %d samples @ 24kHz (source: %s)",
+            ref_array.shape[0], src,
+        )
+        return ref_array
 
     # ------------------------------------------------------------------
     # Language mapping (resolved once at init)
@@ -393,9 +412,9 @@ class Qwen3TTSEngine(BaseTTSEngine):
 
     def set_voice(self, ref_audio: str | Path, ref_text: str = "") -> None:
         """Update reference audio for voice cloning (base models only)."""
-        self.ref_audio = self._normalize_ref_audio(str(ref_audio))
+        self.ref_audio = self._load_ref_as_array(str(ref_audio))
         self.ref_text = ref_text
-        logger.info("Voice reference updated: %s", self.ref_audio)
+        logger.info("Voice reference updated from: %s", ref_audio)
 
     # ------------------------------------------------------------------
     # BaseTTSEngine abstract method — not used by our pipeline but
